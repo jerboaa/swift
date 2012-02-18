@@ -305,7 +305,12 @@ class ContainerController(object):
             return HTTPBadRequest(body='parameters not utf8',
                                   content_type='text/plain', request=req)
         if query_format:
-            req.accept = 'application/%s' % query_format.lower()
+            try:
+                # This fails for webobj <= 1.2b since it internally calls str() on an
+                # already UTF8 encoded string
+                req.accept = 'application/%s' % query_format.lower()
+            except UnicodeEncodeError:
+                req.accept = 'text/plain'
         try:
             out_content_type = req.accept.best_match(
                                     ['text/plain', 'application/json',

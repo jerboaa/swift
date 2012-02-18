@@ -111,9 +111,9 @@ def get_param(req, name, default=None):
     :param default: result to return if the parameter is not found
     :returns: HTTP request parameter value
     """
-    value = req.str_params.get(name, default)
-    if value:
-        value.decode('utf8')    # Ensure UTF8ness
+    value = req.params.get(name, default)
+    if value and not isinstance(value, unicode):
+        value.decode('utf8')    # Ensure UTF8ness only if not UTF8 already
     return value
 
 
