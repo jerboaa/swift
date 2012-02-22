@@ -611,13 +611,17 @@ def put_object(url, token=None, container=None, name=None, contents=None,
         else:
             conn.endheaders()
             left = content_length
-            while left > 0:
+            reached_eof = False
+            while left > 0 and not reached_eof:
                 size = chunk_size
                 if size > left:
                     size = left
                 chunk = contents.read(size)
                 conn.send(chunk)
-                left -= len(chunk)
+                the_len = len(chunk)
+                left -= the_len
+                if (the_len == 0):
+                    reached_eof = True
     else:
         conn.request('PUT', path, contents, headers)
     resp = conn.getresponse()
