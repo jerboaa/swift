@@ -20,9 +20,9 @@ from optparse import OptionParser, SUPPRESS_HELP
 from os import environ, listdir, makedirs, utime
 from os.path import basename, dirname, getmtime, getsize, isdir, join
 from Queue import Empty, Queue
-from sys import argv, exc_info, exit, stderr, stdout
+from sys import argv, exc_info, exit, stderr, stdout, stdin
 from threading import enumerate as threading_enumerate, Thread
-from time import sleep
+from time import sleep, time
 from traceback import format_exception
 
 
@@ -1615,7 +1615,11 @@ upload [options] container file_or_directory [file_or_directory] [...]
     Uploads to the given container the files and directories specified by the
     remaining args. -c or --changed is an option that will only upload files
     that have changed since the last upload. -S <size> or --segment-size <size>
-    and --leave-segments are options as well (see --help for more).
+    and --leave-segments are options as well (see --help for more). Contents
+    can be supplied from standard input by adding '-' flag after a filename.
+    This option allows only one container and one filename to be specified. The
+    filename will be used to store the content as provided by standard input 
+    in the container.
 '''.strip('\n')
 
 
@@ -1635,12 +1639,18 @@ def st_upload(options, args, print_queue, error_queue):
         'overwrites)')
     (options, args) = parse_args(parser, args)
     args = args[1:]
-    if len(args) < 2:
+    if args[-1] == "-":
+        # stdin case only allow argslength of 3
+        if (len(args) != 3):
+            error_queue.put('Usage: %s [options] %s' %
+                            (basename(argv[0]), st_upload_help))
+            return
+    elif len(args) < 2:
         error_queue.put('Usage: %s [options] %s' %
                         (basename(argv[0]), st_upload_help))
         return
     object_queue = Queue(10000)
-
+    
     def _segment_job(job, conn):
         if job.get('delete', False):
             conn.delete_object(job['container'], job['obj'])
@@ -1660,13 +1670,18 @@ def st_upload(options, args, print_queue, error_queue):
         path = job['path']
         container = job.get('container', args[0])
         dir_marker = job.get('dir_marker', False)
+
         try:
             obj = path
             if obj.startswith('./') or obj.startswith('.\\'):
                 obj = obj[2:]
             if obj.startswith('/'):
                 obj = obj[1:]
-            put_headers = {'x-object-meta-mtime': str(getmtime(path))}
+            # if reading from stdin, use now as modifcation time
+            if args[-1] != "-":
+                put_headers = {'x-object-meta-mtime': str(getmtime(path))}
+            else:
+                put_headers = {'x-object-meta-mtime': str(time())}
             if dir_marker:
                 if options.changed:
                     try:
@@ -1696,7 +1711,7 @@ def st_upload(options, args, print_queue, error_queue):
                         headers = conn.head_object(container, obj)
                         cl = int(headers.get('content-length'))
                         mt = headers.get('x-object-meta-mtime')
-                        if options.changed and cl == getsize(path) and \
+                        if args[-1] != "-" and options.changed and cl == getsize(path) and \
                                 mt == put_headers['x-object-meta-mtime']:
                             return
                         if not options.leave_segments:
@@ -1704,7 +1719,7 @@ def st_upload(options, args, print_queue, error_queue):
                     except ClientException, err:
                         if err.http_status != 404:
                             raise
-                if options.segment_size and \
+                if args[-1] != "-" and options.segment_size and \
                         getsize(path) < options.segment_size:
                     full_size = getsize(path)
                     segment_queue = Queue(10000)
@@ -1747,8 +1762,17 @@ def st_upload(options, args, print_queue, error_queue):
                     conn.put_object(container, obj, '', content_length=0,
                                     headers=put_headers)
                 else:
-                    conn.put_object(container, obj, open(path, 'rb'),
-                        content_length=getsize(path), headers=put_headers)
+                    if args[-1] == "-":
+                        data = ""
+                        for line in stdin:
+                            data += line
+                        conn.put_object(container, obj, data,
+                            len(data), headers=put_headers)
+                    else:
+                        conn.put_object(container, obj, open(path, 'rb'),
+                            content_length=getsize(path), headers=put_headers)
+
+
                 if old_manifest:
                     segment_queue = Queue(10000)
                     scontainer, sprefix = old_manifest.split('/', 1)
@@ -1818,11 +1842,17 @@ def st_upload(options, args, print_queue, error_queue):
         error_queue.put(
             'Error trying to create container %r: %s' % (args[0], err))
     try:
-        for arg in args[1:]:
-            if isdir(arg):
-                _upload_dir(arg)
-            else:
-                object_queue.put({'path': arg})
+        # Input is from stdin, only single filename can be supplied
+        if args[-1] == "-":
+            object_queue.put({'path': args[1]})
+       
+        # Input should be read from file(s)
+        else:
+            for arg in args[1:]:
+                if isdir(arg):
+                    _upload_dir(arg)
+                else:
+                    object_queue.put({'path': arg})
         while not object_queue.empty():
             sleep(0.01)
         for thread in object_threads:
@@ -1937,6 +1967,7 @@ Example:
     parser.disable_interspersed_args()
     (options, args) = parse_args(parser, argv[1:], enforce_requires=False)
     parser.enable_interspersed_args()
+
 
     commands = ('delete', 'download', 'list', 'post', 'stat', 'upload')
     if not args or args[0] not in commands:
